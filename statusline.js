@@ -61,17 +61,24 @@ const BG = h => '\x1b[48;2;' + rgb(h).join(';') + 'm';
 const SEP = '';      // powerline arrow
 const THIN = '';     // outline chevron, for same-bg neighbours
 
-// working/waiting state written by the session-state.js hooks.
+// working/waiting state written by the session-state.js hooks; the file's
+// mtime is when the current stint began.
 let state = '';
+let stateSince = 0;
 try {
-  state = fs.readFileSync(path.join(__dirname, 'session-tasks', input.session_id + '.state'), 'utf8').trim();
+  const stateFile = path.join(__dirname, 'session-tasks', input.session_id + '.state');
+  state = fs.readFileSync(stateFile, 'utf8').trim();
+  stateSince = fs.statSync(stateFile).mtimeMs;
 } catch (_) {}
 
 const segs = [];
 if (state === 'waiting') {
   segs.push({ text: '❯', fg: C.red, bg: C.storm, bold: true });
 } else if (state === 'working') {
-  segs.push({ text: '●', fg: C.green, bg: C.storm });
+  const mins = Math.floor((Date.now() - stateSince) / 60000);
+  const dur = mins < 1 ? '' : mins < 60 ? ' ' + mins + 'm'
+    : ' ' + Math.floor(mins / 60) + 'h' + String(mins % 60).padStart(2, '0');
+  segs.push({ text: '●' + dur, fg: C.green, bg: C.storm });
 }
 if (branch) {
   segs.push({ text: '⌂ ' + name, fg: C.bgDark, bg: C.blue, bold: true });

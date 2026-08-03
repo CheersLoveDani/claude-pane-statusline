@@ -26,7 +26,11 @@ try {
     try { fs.unlinkSync(file); } catch (_) {}
   } else if (mode === 'working' || mode === 'waiting') {
     fs.mkdirSync(DIR, { recursive: true });
-    fs.writeFileSync(file, mode);
+    // Write only on transition — the file's mtime is the stint start time,
+    // which the statusline shows as "how long has this pane been working".
+    let prev = '';
+    try { prev = fs.readFileSync(file, 'utf8').trim(); } catch (_) {}
+    if (prev !== mode) fs.writeFileSync(file, mode);
   }
 } catch (_) {}
 
