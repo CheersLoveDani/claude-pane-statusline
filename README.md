@@ -4,6 +4,8 @@ A statusline for people who run **several Claude Code sessions in split panes** 
 tell which pane is which. Each pane labels itself with what it's working on and whether
 it needs your attention:
 
+![Two statusline examples: a working pane with issue chip and gauges, and a red-caret pane waiting for input](preview.svg)
+
 ```
  ● │ ⌂ my-repo │  main │ #70 │ ✦ Fix instance budget test failures │ Opus 5 │ ▰▰▱▱▱ 42% │ ⧖ 7d 78%
 ```
