@@ -133,6 +133,57 @@ You are installing three self-contained node scripts and registering them in the
    - Delete the `t1.*` test files and confirm `settings.json` still parses as JSON.
 5. Tell the user: restart claude sessions (or `/hooks` once in each) to activate.
 
+## Extending it
+
+The whole system communicates through plain files in `~/.claude/session-tasks/`, keyed by
+session id — that directory **is** the API. Anything that writes these files drives the
+statusline; anything can read them:
+
+| File | Contents | Effect |
+|---|---|---|
+| `<id>.txt` | one line of text | The `✦` label, shown verbatim. Write it directly to bypass Haiku entirely. |
+| `<id>.issue` | e.g. `#123 fix the flaky test` | Pins context: the leading `#123` renders as the orange chip, and the full text anchors every future Haiku title until the file is deleted. |
+| `<id>.history` | one prompt/context line per row | What Haiku summarizes. Append lines to feed extra context into future titles. |
+| `<id>.state` | `working` or `waiting` | The green dot / red caret. The file's mtime is treated as the stint start, so touch it only on transitions. |
+| `<id>.pending` | empty marker | Shows the pulsing-star spinner while present (ignored after 90 s). |
+
+Files older than 7 days are pruned automatically, so extensions don't need cleanup logic.
+
+**Where to get the session id:** every Claude Code hook receives it as `session_id` in the
+JSON on stdin (it is *not* in the environment of commands the agent runs). So the natural
+place to extend is another hook.
+
+**Add your own trigger.** The issue chip is just a worked example: a `PostToolUse` hook
+watching tool commands for `issue.ps1 claim <n>`. To key off your own convention — say
+`gh issue develop <n>`, a Jira CLI, or a make target — copy the pattern in
+`session-state.js`: match the command, write `<id>.issue` (or any of the files above),
+and optionally trigger a title refresh:
+
+```js
+// inside a PostToolUse hook script; `input` is the stdin JSON
+const m = ((input.tool_input || {}).command || '').match(/^gh issue develop (\d+)/);
+if (m) {
+  fs.writeFileSync(path.join(DIR, input.session_id + '.issue'), '#' + m[1]);
+  spawnSync('node', [path.join(__dirname, 'session-task.js'), '--refresh'],
+    { input: JSON.stringify({ session_id: input.session_id }), encoding: 'utf8', timeout: 90000 });
+}
+```
+
+Two hard-won rules for custom triggers:
+
+1. **Match invocations, not mentions.** Anchor your pattern to the start of a command or
+   a statement separator. An unanchored match will fire on the string appearing inside a
+   quoted payload, a grep, or a doc edit — ours once pinned an issue to the session that
+   was merely *testing* the feature.
+2. **Guard against recursion** if your extension spawns `claude`. Set
+   `RTS_TASK_SUMMARIZER=1` (or your own sentinel checked at the top of every hook script)
+   in the child's environment, or the child's hooks will fire your hook again, forever.
+
+**Regenerate the title on demand:** pipe `{"session_id":"<id>"}` into
+`node ~/.claude/session-task.js --refresh`. It rebuilds the label from `.history` +
+`.issue` without adding anything — this is what the claim trigger uses, and it's the right
+call after your extension changes either file.
+
 ## Uninstall
 
 Delete the three scripts and the `~/.claude/session-tasks/` folder, and remove the
