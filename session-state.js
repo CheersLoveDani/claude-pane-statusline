@@ -33,8 +33,15 @@ try {
 // Issue tracking: a claim via the repo's issue.ps1 pins that issue to the pane
 // (statusline chip + summarizer context) until issue.ps1 done clears it.
 const cmdStr = (input.tool_input && input.tool_input.command) || '';
-const claim = cmdStr.match(/issue\.ps1['"\s]+claim\s+(\d+)/i);
-const done = cmdStr.match(/issue\.ps1['"\s]+done\s+(\d+)/i);
+// Match only a real invocation — the script path at the start of a statement —
+// not any mention of the text (a quoted test payload once pinned an issue to the
+// session that was merely testing this feature).
+const invoke = verb => new RegExp(
+  '(?:^|[;\\r\\n]|&&|\\|\\|)\\s*' +               // start of a statement
+  '(?:powershell(?:\\.exe)?\\s+(?:-\\S+\\s+)*|pwsh\\s+(?:-\\S+\\s+)*)?' +
+  '(?:&\\s+)?"?(?:[.\\w:~-]*[\\\\/])*issue\\.ps1"?\\s+' + verb + '\\s+(\\d+)', 'i');
+const claim = cmdStr.match(invoke('claim'));
+const done = cmdStr.match(invoke('done'));
 const issueFile = path.join(DIR, id + '.issue');
 if (claim) {
   let label = '#' + claim[1];
