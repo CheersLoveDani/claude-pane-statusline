@@ -19,26 +19,35 @@ let input = {};
 try { input = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, '')); } catch (_) { process.exit(0); }
 
 const id = input.session_id;
-const prompt = (input.prompt || '').replace(/\s+/g, ' ').trim();
-// Skip slash commands and short continuations ("yes", "do it") — they would
-// clobber a good label without saying what the pane is working on.
-if (!id || prompt.startsWith('/') || prompt.length < 15) process.exit(0);
+if (!id) process.exit(0);
+
+// --refresh regenerates the title from existing history without a new prompt
+// (used by session-state.js when a session claims an issue mid-turn).
+const refresh = process.argv[2] === '--refresh';
 
 // Keep a per-session history so the title reflects the whole session, not just
 // the latest message. Capped at the most recent 20 prompts.
 let history = [];
 const histFile = path.join(DIR, id + '.history');
 try { history = fs.readFileSync(histFile, 'utf8').split('\n').filter(Boolean); } catch (_) {}
-history.push(prompt.slice(0, 400));
-history = history.slice(-20);
-try {
-  fs.mkdirSync(DIR, { recursive: true });
-  fs.writeFileSync(histFile, history.join('\n'));
-} catch (_) {}
+
+if (!refresh) {
+  const prompt = (input.prompt || '').replace(/\s+/g, ' ').trim();
+  // Skip slash commands and short continuations ("yes", "do it") — they would
+  // clobber a good label without saying what the pane is working on.
+  if (prompt.startsWith('/') || prompt.length < 15) process.exit(0);
+  history.push(prompt.slice(0, 400));
+  history = history.slice(-20);
+  try {
+    fs.mkdirSync(DIR, { recursive: true });
+    fs.writeFileSync(histFile, history.join('\n'));
+  } catch (_) {}
+}
 
 // If the session has claimed a tracker issue, anchor the title to it.
 let issue = '';
 try { issue = fs.readFileSync(path.join(DIR, id + '.issue'), 'utf8').trim(); } catch (_) {}
+if (!history.length && !issue) process.exit(0); // nothing to summarize
 
 const instruction =
   'Write a task title of at most 6 words for a coding session. ' +

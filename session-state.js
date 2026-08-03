@@ -61,6 +61,13 @@ if (claim) {
     fs.writeFileSync(issueFile, label);
     fs.appendFileSync(path.join(DIR, id + '.history'), '\n(claimed issue ' + label + ')');
   } catch (_) {}
+  // Regenerate the title now — in a "pick an issue and action it" session the
+  // claim happens mid-turn and there may be no further prompt to trigger it.
+  try {
+    const { spawnSync } = require('child_process');
+    spawnSync('node', [path.join(__dirname, 'session-task.js'), '--refresh'],
+      { input: JSON.stringify({ session_id: id }), encoding: 'utf8', timeout: 90000 });
+  } catch (_) {}
 } else if (done) {
   try { fs.unlinkSync(issueFile); } catch (_) {}
 }
