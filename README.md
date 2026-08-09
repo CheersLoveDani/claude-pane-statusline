@@ -123,7 +123,10 @@ accumulated holding 33 GB:
 - Claude Code's spawner can abandon a render child it created `CREATE_SUSPENDED` — the
   process never executes a single line of JS (one suspended thread, 0 CPU, ~30 MB), so no
   script-side fix can help. `statusline-reaper.ps1` culls any statusline node older than
-  60 s (healthy renders exit in well under a second). Register it as a scheduled task:
+  60 s (healthy renders exit in well under a second). It also culls orphaned
+  `cygwin-console-helper.exe` processes — a killed Git Bash strands its hidden-console
+  helper plus a `conhost.exe` (162 pairs held 2.2 GB alongside the node leak). Register
+  it as a scheduled task:
 
   ```powershell
   $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
