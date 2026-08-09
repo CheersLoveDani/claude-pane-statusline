@@ -112,6 +112,28 @@ If your repo has no such script this simply never triggers — or adapt the rege
 - Label length is capped at 60 chars (trimmed at a word boundary at generation time).
 - Testing from PowerShell 5.1? Its pipes prepend a BOM; the scripts strip it deliberately.
 
+## Leaked render processes (Windows)
+
+Two ways a render's node process can outlive its ~200 ms job, found after 1,083 of them
+accumulated holding 33 GB:
+
+- The script used to read stdin with `fs.readFileSync(0)`, which blocks forever if the
+  pipe never delivers EOF — and no timer can rescue a blocked sync call. Fixed:
+  `statusline.js` now reads stdin async with a 500 ms deadline and exits explicitly.
+- Claude Code's spawner can abandon a render child it created `CREATE_SUSPENDED` — the
+  process never executes a single line of JS (one suspended thread, 0 CPU, ~30 MB), so no
+  script-side fix can help. `statusline-reaper.ps1` culls any statusline node older than
+  60 s (healthy renders exit in well under a second). Register it as a scheduled task:
+
+  ```powershell
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\YOU\.claude\statusline-reaper.ps1"'
+  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+  Register-ScheduledTask -TaskName 'StatuslineReaper' -Action $action -Trigger $trigger -Settings $settings
+  ```
+
 ## Instructions for the installing agent
 
 You are installing three self-contained node scripts and registering them in the user's
