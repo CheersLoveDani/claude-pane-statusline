@@ -85,9 +85,15 @@ wrapper, and has neither `grep` nor `tr` on `PATH` — it would break the Bash t
 ## Build
 
 ```sh
-cargo build --release   # -> target/release/statusline.exe (~300 KB)
-cargo test              # 29 unit tests
+cargo build --release   # -> target/release/statusline.exe (~310 KB)
+cargo test              # 36 unit tests
+.\tests\reaper-integration.ps1   # ~90s; stray collection against real
+                                 # CREATE_SUSPENDED processes
 ```
+
+The unit tests cannot cover the part of stray collection that matters, so the integration
+script creates genuinely suspended processes with `CreateProcess(CREATE_SUSPENDED)` and
+never resumes them — reproducing the upstream bug exactly rather than simulating it.
 
 ## Setup
 
@@ -151,8 +157,11 @@ The "Instructions for the installing agent" section below is written for it to f
   `waiting`; session ended → state cleared. `PostToolUse → working` is what turns a pane
   green again after you approve a permission.
 - State lives in `~/.claude/session-tasks/` (`.txt` label, `.history`, `.state`,
-  `.pending` spinner marker, `.spin` frame counter, `.issue`); files older than 7 days are
-  pruned automatically.
+  `.pending` spinner marker, `.spin` frame counter, `.issue`, plus the shared `.reap`
+  stamp); files older than 7 days are pruned automatically.
+- Once a minute, whichever render happens to be running also collects abandoned renders
+  (see "Leaked render processes"). There is no scheduled task and no background service —
+  nothing of this runs when Claude Code isn't.
 - The summarizer child process sets `RTS_TASK_SUMMARIZER`, which makes all these hooks
   exit immediately — that guard prevents infinite hook recursion. Don't remove it.
 
@@ -176,41 +185,45 @@ If your repo has no such script this simply never triggers — or adapt the matc
 
 ## Leaked render processes (Windows)
 
-**This is an upstream bug and nothing in this repo can fix it — only collect after it.**
+**This is an upstream bug. Nothing in this repo can prevent it — the binary collects after
+it instead, and needs no scheduled task, no PowerShell and no extra process to do so.**
 
 Claude Code's spawner sometimes creates a render child `CREATE_SUSPENDED` and abandons it
 before resuming. Caught in the act, a stray has **0 CPU time, one thread, `ThreadState 5`
 (Wait) / `ThreadWaitReason 5` (Suspended)**: it never executed a single instruction. No
 code inside the process can rescue it, in any language — a native binary gets stranded
-exactly as a node script did. 1,083 of them accumulated holding 33 GB on 2026-08-09,
-before the reaper existed.
+exactly as a node script did. 1,083 of them accumulated holding 33 GB on 2026-08-09.
 
-What the port changes is the blast radius, not the bug: each stray is now ~4 MB instead of
-~33 MB, and there are fewer of them because there are fewer spawns to lose the race with.
+So something *else* has to kill them, and the cheapest available "something else" is the
+next render. `src/reap.rs` sweeps for abandoned copies of itself, which is strictly better
+than the scheduled task it replaces:
+
+- **no extra processes** — it runs inside one that Claude Code already spawned, where the
+  old task cost `wscript` + `powershell` + a conhost (~0.5 s) every 5 minutes forever, to
+  usually find nothing
+- **it fires when strays are created**, because strays *are* abandoned renders: no
+  renders, no strays, nothing to collect. The trigger and the cause are the same event.
+- **collection within a minute** rather than up to five
+
+A sweep is rate-limited by the mtime of a `.reap` stamp file, so the common render pays one
+`stat` (~10 µs) and only one render a minute pays the ~11 ms process-table walk — about
+0.02% of a core.
+
+It kills a process only when **all** of these hold: the image name matches, the full image
+path on disk is byte-identical to its own (so a same-named binary elsewhere is never
+touched), it is not itself, and it either has 0 CPU time more than 15 s after starting
+(never resumed — conclusive) or is older than 60 s (ran, but hung). A healthy render exits
+in ~10 ms, so neither threshold is a close call.
+
+Verified against real `CREATE_SUSPENDED` processes, not simulations: an abandoned copy is
+reaped, one younger than 15 s is spared, a same-named binary at a different path survives,
+an unrelated long-lived process survives 12 consecutive sweeps, and the sweeping render
+still emits correct output.
 
 (A separate leak *was* fixable and is fixed: the original script read stdin with
 `fs.readFileSync(0)`, which blocks forever if the pipe never delivers EOF, and no timer
 can rescue a blocked sync call. The renderer now reads stdin on a thread with a 500 ms
 deadline and exits explicitly.)
-
-`statusline-reaper.ps1` collects the rest. It culls a render that either has 0 CPU time
-15 s after starting (never resumed — conclusive) or is simply older than 60 s (a healthy
-render exits in ~10 ms). It also culls orphaned `cygwin-console-helper.exe` processes — a
-killed Git Bash strands its hidden-console helper plus a `conhost.exe` (162 pairs held
-2.2 GB alongside the node leak).
-
-Copy `statusline-reaper.ps1` **and** `statusline-reaper.vbs` into `~/.claude/` (the `.vbs`
-finds the `.ps1` next to itself, so neither needs editing), then register the task. It
-runs via `wscript.exe` so no console window flashes every 5 minutes:
-
-  ```powershell
-  $action = New-ScheduledTaskAction -Execute 'wscript.exe' `
-    -Argument '//B //Nologo "C:\Users\YOU\.claude\statusline-reaper.vbs"'
-  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
-  $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
-  Register-ScheduledTask -TaskName 'StatuslineReaper' -Action $action -Trigger $trigger -Settings $settings
-  ```
 
 ## Instructions for the installing agent
 
@@ -235,10 +248,9 @@ Nothing here touches a project.
    - Pipe `{"session_id":"t1"}` into `~/.claude/statusline.exe state waiting` →
      `~/.claude/session-tasks/t1.state` contains `waiting`.
    - Delete the `t1.*` test files and confirm `settings.json` still parses as JSON.
-5. On Windows, copy `statusline-reaper.ps1` and `statusline-reaper.vbs` into `~/.claude/`
-   and register the scheduled task from "Leaked render processes". Confirm it works with
-   `Start-ScheduledTask -TaskName 'StatuslineReaper'` followed by
-   `(Get-ScheduledTaskInfo -TaskName 'StatuslineReaper').LastTaskResult` → `0`.
+5. Nothing to register for leaked-process cleanup — the binary collects its own strays.
+   If the user has a `StatuslineReaper` scheduled task from an older install, remove it:
+   `Unregister-ScheduledTask -TaskName 'StatuslineReaper' -Confirm:$false`.
 6. Tell the user: restart claude sessions (or `/hooks` once in each) to activate.
 
 ## Extending it
@@ -255,6 +267,7 @@ statusline; anything can read them:
 | `<id>.state` | `working` or `waiting` | The green dot / red caret. The file's mtime is treated as the stint start, so touch it only on transitions. |
 | `<id>.pending` | empty marker | Shows the pulsing-star spinner while present (ignored after 90 s). Its **mtime is the staleness anchor**, so never rewrite it to signal liveness — recreate it. |
 | `<id>.spin` | a digit 0-7 | Spinner frame, advanced by the renderer on each redraw. Written only while `.pending` is fresh; delete it freely. |
+| `.reap` | empty stamp (not per-session) | Rate limit for stray collection — its mtime is the last sweep. Delete it to force a sweep on the next render. |
 
 Files older than 7 days are pruned automatically, so extensions don't need cleanup logic.
 
@@ -295,9 +308,11 @@ call after your extension changes either file.
 
 ## Uninstall
 
-Delete `statusline.exe`, `session-task.js` and the `~/.claude/session-tasks/` folder,
-remove the `statusLine` block and the six hook entries from `~/.claude/settings.json`, and
-unregister the reaper with `Unregister-ScheduledTask -TaskName 'StatuslineReaper'`.
+Delete `statusline.exe`, `session-task.js` and the `~/.claude/session-tasks/` folder, and
+remove the `statusLine` block and the six hook entries from `~/.claude/settings.json`.
+There is no scheduled task or background service to unregister. (If you installed a version
+before stray collection moved into the binary, also run
+`Unregister-ScheduledTask -TaskName 'StatuslineReaper' -Confirm:$false`.)
 
 ## License
 

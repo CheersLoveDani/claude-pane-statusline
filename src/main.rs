@@ -13,15 +13,16 @@
 // roughly six processes deep once Git Bash's double-exec and the conhosts were
 // counted. Nothing here needs a JS runtime, so it no longer has one.
 //
-// What this does NOT fix: Claude Code sometimes creates a render process
+// What this does NOT prevent: Claude Code sometimes creates a render process
 // suspended and abandons it before it ever runs an instruction (0 CPU time, one
 // suspended thread). Those strays leak whatever the binary is written in — no
-// code inside the process runs, so it cannot defend itself. statusline-reaper.ps1
-// culls them; this binary just makes each stray ~3 MB instead of ~33 MB, and
-// makes them rarer by being a much smaller target window.
+// code inside the process runs, so it cannot defend itself. Since nothing can
+// stop it from inside, the next render collects it instead (see reap.rs), which
+// needs no scheduled task and no extra process.
 
 mod json;
 mod paths;
+mod reap;
 mod render;
 mod state;
 
@@ -79,6 +80,7 @@ fn main() {
                 Some(mode @ ("working" | "waiting" | "clear")) => state::run(mode, &input),
                 _ => eprintln!("usage: statusline state working|waiting|clear"),
             }
+            reap::maybe_sweep(&paths::session_tasks_dir());
             std::process::exit(0);
         }
         // Bare invocation (or an explicit `render`) is the statusline itself.
@@ -87,6 +89,9 @@ fn main() {
             let mut out = std::io::stdout();
             let _ = out.write_all(line.as_bytes());
             let _ = out.flush();
+            // Collect abandoned siblings *after* the line is out, so the sweep
+            // never delays what the user sees. Rate-limited to once a minute.
+            reap::maybe_sweep(&paths::session_tasks_dir());
             // Exit explicitly: the stdin reader thread may still be parked on a
             // pipe that will never close, and a stray render must never outlive
             // its own output.
