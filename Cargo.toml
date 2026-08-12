@@ -1,0 +1,23 @@
+[package]
+name = "claude-pane-statusline"
+version = "0.1.0"
+edition = "2021"
+
+# One binary serves every hot path: the statusline render and the working/waiting
+# state hook. Deploy it to ~/.claude/ — session-tasks/ is resolved next to the
+# executable, the same way the JS resolved it next to __dirname.
+[[bin]]
+name = "statusline"
+path = "src/main.rs"
+
+# No dependencies, on purpose. The whole point is a process that starts in
+# single-digit milliseconds; every crate is build-time and supply-chain surface
+# for a program that parses one small JSON object and prints one line.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

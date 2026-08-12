@@ -1,6 +1,9 @@
 // UserPromptSubmit hook: distils the latest substantive prompt into a short task
 // title (via `claude -p --model haiku`, billed to the logged-in subscription) so
-// the statusline (~/.claude/statusline.js) can label each pane with its current task.
+// the statusline (~/.claude/statusline.exe) can label each pane with its current task.
+// This is the one piece still in node: it drives a `claude -p` child either way,
+// so a JS runtime is not the dominant cost, and it runs once per prompt rather
+// than once per render.
 // Configured in ~/.claude/settings.json -> hooks.UserPromptSubmit (async).
 'use strict';
 const fs = require('fs');
@@ -64,8 +67,10 @@ const pendingFile = path.join(DIR, id + '.pending');
 try { fs.writeFileSync(pendingFile, ''); } catch (_) {}
 
 // cwd is tmpdir so the child session does not load this project's CLAUDE.md.
+// No `shell: true`: it bought nothing but an extra cmd.exe and its conhost on
+// every summarize, and libuv resolves `claude` -> claude.exe from PATH anyway.
 const r = spawnSync('claude', ['-p', '--model', 'haiku'], {
-  input: instruction, encoding: 'utf8', shell: true, timeout: 60000, cwd: os.tmpdir(),
+  input: instruction, encoding: 'utf8', timeout: 60000, cwd: os.tmpdir(),
   env: Object.assign({}, process.env, { RTS_TASK_SUMMARIZER: '1' }),
 });
 try { fs.unlinkSync(pendingFile); } catch (_) {}
