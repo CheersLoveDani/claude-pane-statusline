@@ -23,7 +23,8 @@ it needs your attention:
 
 Task labels are generated with `claude -p --model haiku`, billed to whatever login your
 `claude` CLI has (a Claude subscription works — no API key needed). One small call per
-substantive prompt. If the call fails, the previous label just stays.
+substantive prompt. If the call fails, the previous label just stays. It is also the only
+part of this that costs anything measurable — see [What it costs to run](#what-it-costs-to-run).
 
 Colors are Tokyo Night truecolor; the palette is a single block of constants at the top of
 `src/render.rs` if you want to reskin it.
@@ -36,18 +37,21 @@ once per second per pane on top of that. A process spawn is the unit of cost her
 runtime you pay for it dominates everything else.
 
 Measured on the node implementation this replaces, which did run with `refreshInterval: 1`
-(Windows 11, 5 panes):
+(Windows 11, 5 panes). CPU figures are whole process **trees**, measured with a Windows
+Job Object so the second bash, `git`, and every other child is counted — per-process
+timing misses them, which is how a chain can look cheap while being expensive:
 
-| | node | native |
+| per render | node | native |
 |---|---|---|
-| Per render | 366 ms | **9.7 ms** |
+| Wall clock | 366 ms | **9.7 ms** |
+| CPU (whole tree) | 309.4 ms | **135.9 ms** |
+| Processes | 4 | **3** |
 | Working set | 47 MB | **4.3 MB** |
-| Processes per render | ~6 | 2 |
-| Renders/min (5 panes) | ~180 | **24** |
-| CPU spent rendering | ~106 s/min | **~0.2 s/min** |
 
-That 106 s/min is not a typo: at 592 ms a render, drawing the statusline occupied more
-than a full core permanently.
+The number that matters is the one that isn't in the table: **`bash -c "exit 0"` costs
+140.6 ms of CPU and 2 processes.** That is what Claude Code pays to run *any* command on
+Windows. A render now costs *less than the empty wrapper around it* — the renderer's own
+cost has disappeared into the noise, and there is nothing further to win here.
 
 Six processes, because a render was `bash → bash → node → git` (Git Bash's launcher
 re-execs itself, and Claude Code wraps every command in it) plus a `conhost.exe` for the
@@ -69,6 +73,43 @@ Do **not** try to shave the duplicate `bash` with `CLAUDE_CODE_GIT_BASH_PATH` po
 `Git\usr\bin\bash.exe`. It looks equivalent from inside a Git Bash shell only because the
 environment is inherited; launched clean it has no `MSYSTEM`, resolves `git` to the `/cmd`
 wrapper, and has neither `grep` nor `tr` on `PATH` — it would break the Bash tool.
+
+## What it costs to run
+
+Against a Claude Code with no statusline configured at all, which spawns none of this:
+
+| | CPU | processes | when |
+|---|---|---|---|
+| Render | 137.5 ms | 3 | per statusline update (~21/min across 5 busy panes; **zero** on an idle pane) |
+| State hook | 129.7 ms | 3 | per tool call |
+| Summarizer | **8.8 s** | 116 | per *substantive* prompt |
+| *(reference: `bash -c "exit 0"`)* | *140.6 ms* | *2* | *what Claude Code pays for any command* |
+
+Renders and the state hook are at the wrapper floor, so in practice **the summarizer is the
+whole cost of this project** — it is a real model call, and it is ~60x everything else put
+together. It is also easy to miss, because it runs async and nothing ever waits on it.
+
+Three things keep it in proportion:
+
+- It fires **once per substantive prompt**, not per turn and not per tool call. Prompts
+  under 15 characters and anything starting with `/` are skipped, so "yes", "do it" and
+  slash commands cost nothing.
+- **You pay only while it generates.** Afterwards the title is a line of text in
+  `<id>.txt`; every later render reads it in microseconds. A pane displaying a label for an
+  hour costs nothing. Verified: `claude` and `node` process counts return exactly to
+  baseline after a run, with nothing left resident.
+- It starts its child with **`--mcp-config "" --strict-mcp-config`**. Without those flags
+  `claude -p` boots the full MCP server set for a one-shot summarization that uses no
+  tools: 28.1 s of CPU and 158 processes, against 8.8 s and 116 with them off.
+
+`--bare` would cut it further still (1.3 s, 21 processes) but forces auth to
+`ANTHROPIC_API_KEY` alone — no OAuth, no keychain — so on a subscription it exits 1 with
+"Not logged in". Only reach for it if you have an API key and want to pay for titles
+separately. If you want this project to cost *nothing*, drop the task labels: renders and
+hooks are already free.
+
+(The 116 figure is every process that ran across the ~13 s call, not concurrent ones —
+about 18 are alive at any instant.)
 
 ## Requirements
 
