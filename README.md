@@ -98,7 +98,7 @@ That is it — `settings.json` is re-read live, so running sessions pick this up
 restart. Note there is no `refreshInterval`; leaving it out is deliberate ([why](#tuning)).
 
 Colors are Tokyo Night truecolor, defined as one block of constants at the top of
-`src/render.rs` if you want to reskin it.
+`src/render.rs` — see [reskinning](docs/extending.md#reskinning).
 
 **Tests**
 
@@ -153,170 +153,41 @@ own command.
 
 ## Performance
 
-Claude Code re-runs the statusline **as a fresh process on every update**. A process spawn
-is the unit of cost, and the runtime you pay for it dominates everything else — which is
-why the renderer is a native binary rather than a script.
+Claude Code re-runs the statusline as a fresh process on every update, so a process spawn is
+the unit of cost — which is why the renderer is a native binary rather than a script.
 
-Measured against the node implementation this replaced (Windows 11, 5 panes, which ran with
-`refreshInterval: 1`). CPU figures are whole process **trees**, measured with a Windows Job
-Object so the second bash, `git` and every other child is counted — per-process timing
-misses them, which is how a chain looks cheap while being expensive:
-
-| per render | node | native |
+| per render | node (before) | native |
 |---|---|---|
 | Wall clock | 366 ms | **9.7 ms** |
 | CPU (whole tree) | 309.4 ms | **135.9 ms** |
-| Processes | 4 | **3** |
 | Working set | 47 MB | **4.3 MB** |
 
-**The number that matters is not in the table: `bash -c "exit 0"` costs 140.6 ms of CPU and
-2 processes.** That is what Claude Code pays to run *any* command on Windows. A render now
-costs less than the empty wrapper around it, so the renderer's own cost has vanished into
-the noise and there is nothing further to win.
+For scale, `bash -c "exit 0"` costs **140.6 ms** of CPU — what Claude Code pays to run *any*
+command on Windows. **A render now costs less than the empty wrapper around it**, and an idle
+pane costs nothing at all. The only measurable cost left is the Haiku summarizer, ~8.8 s per
+substantive prompt, and only while it generates.
 
-Two changes got it there. `git` is gone — the branch is read from `.git/HEAD` instead of
-shelling out, which alone was ~93 ms and a whole process per render. And **the clock was
-deleted**: nothing in this line changes without an event except the summarizer spinner, so
-the spinner was the sole reason `refreshInterval` had to exist, and that one-second timer
-re-ran the entire chain on every pane forever, busy or idle, to animate a glyph on screen
-for ~15 s per prompt. The spinner now advances **one frame per redraw**. An active pane
-already renders 0.25–2×/sec from events, and a pane is busy precisely when it is
-summarising, so the star rides redraws that were happening anyway — and sparse redraws read
-as deliberate motion rather than the random frame-skipping a wall-clock index gives you.
-
-### What it costs to run
-
-Against a Claude Code with no statusline configured, which spawns none of this:
-
-| | CPU | processes | when |
-|---|---|---|---|
-| Render | 137.5 ms | 3 | per update (~21/min across 5 busy panes; **zero** when idle) |
-| State hook | 129.7 ms | 3 | per tool call |
-| Summarizer | **8.8 s** | 116 | per *substantive* prompt |
-| *(reference: `bash -c "exit 0"`)* | *140.6 ms* | *2* | *what Claude Code pays for any command* |
-
-Renders and the state hook sit at the wrapper floor, so **the summarizer is the whole cost
-of this project** — it is a real model call, ~60× everything else combined, and easy to miss
-because it runs async and nothing waits on it. Three things keep it in proportion:
-
-- It fires **once per substantive prompt**, not per turn and not per tool call. Prompts
-  under 15 characters and anything starting with `/` are skipped, so "yes", "do it" and
-  slash commands cost nothing.
-- **You pay only while it generates.** Afterwards the title is a line of text; every later
-  render reads it in microseconds, so a pane displaying a label for an hour costs nothing.
-  Verified: `claude` and `node` process counts return exactly to baseline after a run, with
-  nothing left resident.
-- It starts its child with **`--mcp-config "" --strict-mcp-config`**. Without those flags
-  `claude -p` boots your full MCP server set for a one-shot summarization that uses no
-  tools: 28.1 s of CPU and 158 processes, against 8.8 s and 116 with them off.
-
-(That 116 is every process across the ~13 s call, not concurrent ones — about 18 are alive
-at any instant.)
-
-If you want this to cost *nothing*, drop the task labels; renders and hooks are already
-free.
-
-### Two traps
-
-- **`--bare`** would cut the summarizer to 1.3 s and 21 processes, but forces auth to
-  `ANTHROPIC_API_KEY` alone — no OAuth, no keychain — so on a subscription it exits 1 with
-  "Not logged in". Only useful if you have an API key and want to pay for titles separately.
-- **`CLAUDE_CODE_GIT_BASH_PATH`** pointed at `Git\usr\bin\bash.exe` looks like it halves the
-  duplicate `bash`, and it appears equivalent when tested from inside a Git Bash shell —
-  only because the environment is inherited. Launched clean it has no `MSYSTEM`, resolves
-  `git` to the `/cmd` wrapper, and has neither `grep` nor `tr` on `PATH`. It breaks the Bash
-  tool.
+→ **[Full measurements, methodology, and two dead ends](docs/performance.md)**
 
 ## Leaked render processes (Windows)
 
-**An upstream bug. Nothing here can prevent it — the binary collects after it instead, with
-no scheduled task, no PowerShell and no extra process.**
-
 Claude Code's spawner sometimes creates a render child `CREATE_SUSPENDED` and abandons it
-before resuming. Caught in the act, a stray has **0 CPU time, one thread, `ThreadState 5`
-(Wait) / `ThreadWaitReason 5` (Suspended)** — it never executed a single instruction. No
-code inside the process can rescue it, in any language; a native binary is stranded exactly
-as a node script was. 1,083 of them accumulated holding 33 GB on 2026-08-09.
+before resuming: 0 CPU time, one suspended thread, never executed an instruction. No code
+inside such a process can rescue it, in any language. 1,083 of them once held 33 GB.
 
-So something else must kill them, and the cheapest available something else is the next
-render. `src/reap.rs` sweeps for abandoned copies of itself:
+The binary collects them itself — once a minute, whichever render happens to be running
+sweeps for abandoned copies of itself. No scheduled task, no background service, no extra
+process, and nothing runs when Claude Code isn't.
 
-- **No extra processes** — it runs inside one Claude Code already spawned. The scheduled
-  task it replaced cost `wscript` + `powershell` + a conhost (~0.5 s) every 5 minutes
-  forever, to usually find nothing.
-- **It fires when strays are created**, because strays *are* abandoned renders: no renders,
-  no strays, nothing to collect. Trigger and cause are the same event.
-- **Collection within a minute** rather than up to five.
-
-Sweeps are rate-limited by a `.reap` stamp file, so the common render pays one small file
-read (~10 µs) and only one render a minute pays the ~11 ms process-table walk — about 0.02%
-of a core.
-
-It terminates a process only when **all** of these hold: the image name matches, the full
-image path on disk is identical to its own (so a same-named binary elsewhere is never
-touched), it is not itself, and it either has 0 CPU time more than 15 s after starting
-(never resumed — conclusive) or is older than 60 s (ran, but hung). A healthy render exits
-in ~10 ms, so neither threshold is close.
-
-Verified against real `CREATE_SUSPENDED` processes: an abandoned copy is reaped, one younger
-than 15 s is spared, a same-named binary at a different path survives, an unrelated live
-process survives 12 consecutive sweeps, and the sweeping render still emits correct output.
-
-(A separate leak *was* fixable and is fixed: the original script read stdin with
-`fs.readFileSync(0)`, which blocks forever if the pipe never delivers EOF, and no timer can
-rescue a blocked sync call. The renderer reads stdin on a thread with a 500 ms deadline and
-exits explicitly.)
+→ **[Signature, safety rules, and how it is tested](docs/leaked-processes.md)**
 
 ## Extending it
 
-The whole system communicates through plain files in `~/.claude/session-tasks/`, keyed by
-session id — **that directory is the API**. Anything that writes these files drives the
-statusline, and anything can read them:
+The whole system talks through plain files in `~/.claude/session-tasks/`, keyed by session
+id — **that directory is the API**. Write `<id>.txt` and the label changes; write
+`<id>.issue` and the chip appears. Any hook, in any language, can drive it.
 
-| File | Contents | Effect |
-|---|---|---|
-| `<id>.txt` | one line of text | The `✦` label, shown verbatim. Write it directly to bypass Haiku entirely. |
-| `<id>.issue` | e.g. `#123 fix the flaky test` | Pins context: the leading `#123` becomes the orange chip, and the full text anchors every future Haiku title until deleted. |
-| `<id>.history` | one prompt/context line per row | What Haiku summarizes. Append lines to feed extra context into future titles. |
-| `<id>.state` | `working` or `waiting` | The green dot / red caret. Its mtime is the stint start, so touch it only on transitions. |
-| `<id>.pending` | empty marker | Shows the spinner while present (ignored after 90 s). Its **mtime is the staleness anchor** — never rewrite it to signal liveness, recreate it. |
-| `<id>.spin` | a digit 0–7 | Spinner frame, advanced by the renderer each redraw. Written only while `.pending` is fresh; delete it freely. |
-| `.reap` | epoch-ms timestamp (not per-session) | Last stray sweep. Delete it to force a sweep on the next render. |
-
-Files older than 7 days are pruned automatically, so extensions need no cleanup logic.
-
-**Getting the session id:** every Claude Code hook receives it as `session_id` in the JSON
-on stdin — it is *not* in the environment of commands the agent runs. So the natural place
-to extend is another hook.
-
-**Adding your own trigger.** The issue chip is just a worked example: a `PostToolUse` hook
-watching for `issue.ps1 claim <n>`. Because the API is plain files, your trigger need not
-live in this binary or be written in Rust. In node, for instance:
-
-```js
-// inside a PostToolUse hook script; `input` is the stdin JSON
-const m = ((input.tool_input || {}).command || '').match(/^gh issue develop (\d+)/);
-if (m) {
-  fs.writeFileSync(path.join(DIR, input.session_id + '.issue'), '#' + m[1]);
-  spawnSync('node', [path.join(__dirname, 'session-task.js'), '--refresh'],
-    { input: JSON.stringify({ session_id: input.session_id }), encoding: 'utf8', timeout: 90000 });
-}
-```
-
-Two hard-won rules for custom triggers:
-
-1. **Match invocations, not mentions.** Anchor your pattern to the start of a command or a
-   statement separator. An unanchored match fires on the string appearing inside a quoted
-   payload, a grep, or a doc edit — ours once pinned an issue to the session that was merely
-   *testing* the feature.
-2. **Guard against recursion** if your extension spawns `claude`. Set
-   `RTS_TASK_SUMMARIZER=1` (or your own sentinel, checked at the top of every hook) in the
-   child's environment, or the child's hooks fire your hook again, forever.
-
-**Regenerating a title on demand:** pipe `{"session_id":"<id>"}` into
-`node ~/.claude/session-task.js --refresh`. It rebuilds the label from `.history` +
-`.issue` without adding anything — this is what the claim trigger uses, and the right call
-after your extension changes either file.
+→ **[File reference, worked examples, and reskinning](docs/extending.md)**
 
 ## For an installing agent
 
@@ -344,6 +215,33 @@ the user's **user-level** `~/.claude/settings.json`. Nothing here touches a proj
    the user has a `StatuslineReaper` scheduled task from an older install, remove it with
    `Unregister-ScheduledTask -TaskName 'StatuslineReaper' -Confirm:$false`.
 6. Tell the user it is live immediately — `settings.json` is re-read without a restart.
+
+## Contributing
+
+Issues and pull requests welcome. A few things worth knowing first:
+
+- **Run the tests.** `cargo test` for the unit tests, plus `.	estseaper-integration.ps1`
+  on Windows — the unit tests cannot cover the part of stray collection that matters.
+- **Keep `[dependencies]` empty.** Every crate is build-time and supply-chain surface for a
+  program that parses one small JSON object and prints one line. If something genuinely
+  needs one, make the case in the PR.
+- **Measure claims about cost.** Per-process CPU excludes children and wall clock is noisy
+  on a busy machine; both mislead here, and both misled me. See
+  [measuring this yourself](docs/performance.md#measuring-this-yourself).
+- **Non-Windows patches are welcome but untestable by me.** The crate compiles elsewhere and
+  nothing more is promised — say in the PR if you have actually run it.
+
+## Support
+
+Bugs and questions → [GitHub issues](https://github.com/CheersLoveDani/claude-pane-statusline/issues).
+
+Two things that look like bugs and are not:
+
+- **The statusline vanishes entirely.** Usually `statusline.exe` is not where
+  `settings.json` says it is — Claude Code renders nothing rather than complaining. Pipe
+  `{}` into the path in your settings and see whether you get a line back.
+- **Labels never update.** The `claude` CLI is not logged in. Everything else keeps working
+  and the label falls back to Claude Code's built-in session name.
 
 ## Uninstall
 
