@@ -25,7 +25,7 @@ const id = input.session_id;
 if (!id) process.exit(0);
 
 // --refresh regenerates the title from existing history without a new prompt
-// (used by session-state.js when a session claims an issue mid-turn).
+// (used by `statusline.exe state` when a session claims an issue mid-turn).
 const refresh = process.argv[2] === '--refresh';
 
 // Keep a per-session history so the title reflects the whole session, not just

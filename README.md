@@ -31,11 +31,12 @@ Colors are Tokyo Night truecolor; the palette is a single block of constants at 
 ## Why it's a native binary
 
 The renderer is a small Rust executable rather than a script, because Claude Code re-runs
-the statusline **once per second per pane, on top of every event-driven update** — a
-process spawn is the unit of cost here, and the runtime you pay for it dominates
-everything else.
+the statusline **as a fresh process on every update** — and, if you set `refreshInterval`,
+once per second per pane on top of that. A process spawn is the unit of cost here, and the
+runtime you pay for it dominates everything else.
 
-Measured on the node implementation this replaces (Windows 11, 5 panes):
+Measured on the node implementation this replaces, which did run with `refreshInterval: 1`
+(Windows 11, 5 panes):
 
 | | node | native |
 |---|---|---|
@@ -150,7 +151,8 @@ The "Instructions for the installing agent" section below is written for it to f
   `waiting`; session ended → state cleared. `PostToolUse → working` is what turns a pane
   green again after you approve a permission.
 - State lives in `~/.claude/session-tasks/` (`.txt` label, `.history`, `.state`,
-  `.pending` spinner marker, `.issue`); files older than 7 days are pruned automatically.
+  `.pending` spinner marker, `.spin` frame counter, `.issue`); files older than 7 days are
+  pruned automatically.
 - The summarizer child process sets `RTS_TASK_SUMMARIZER`, which makes all these hooks
   exit immediately — that guard prevents infinite hook recursion. Don't remove it.
 
@@ -195,8 +197,11 @@ deadline and exits explicitly.)
 15 s after starting (never resumed — conclusive) or is simply older than 60 s (a healthy
 render exits in ~10 ms). It also culls orphaned `cygwin-console-helper.exe` processes — a
 killed Git Bash strands its hidden-console helper plus a `conhost.exe` (162 pairs held
-2.2 GB alongside the node leak). Register it as a scheduled task, via
-`statusline-reaper.vbs` so no console window flashes every 5 minutes:
+2.2 GB alongside the node leak).
+
+Copy `statusline-reaper.ps1` **and** `statusline-reaper.vbs` into `~/.claude/` (the `.vbs`
+finds the `.ps1` next to itself, so neither needs editing), then register the task. It
+runs via `wscript.exe` so no console window flashes every 5 minutes:
 
   ```powershell
   $action = New-ScheduledTaskAction -Execute 'wscript.exe' `
@@ -209,8 +214,9 @@ killed Git Bash strands its hidden-console helper plus a `conhost.exe` (162 pair
 
 ## Instructions for the installing agent
 
-You are installing one self-contained binary plus one node script, and registering them in
-the user's **user-level** `~/.claude/settings.json`. Nothing here touches a project.
+You are installing one self-contained binary plus one node script (and, on Windows, the
+reaper pair), and registering them in the user's **user-level** `~/.claude/settings.json`.
+Nothing here touches a project.
 
 1. Check the requirements above. If `claude -p` is unavailable, install anyway and tell
    the user labels will fall back to the built-in session name.
@@ -229,7 +235,11 @@ the user's **user-level** `~/.claude/settings.json`. Nothing here touches a proj
    - Pipe `{"session_id":"t1"}` into `~/.claude/statusline.exe state waiting` →
      `~/.claude/session-tasks/t1.state` contains `waiting`.
    - Delete the `t1.*` test files and confirm `settings.json` still parses as JSON.
-5. Tell the user: restart claude sessions (or `/hooks` once in each) to activate.
+5. On Windows, copy `statusline-reaper.ps1` and `statusline-reaper.vbs` into `~/.claude/`
+   and register the scheduled task from "Leaked render processes". Confirm it works with
+   `Start-ScheduledTask -TaskName 'StatuslineReaper'` followed by
+   `(Get-ScheduledTaskInfo -TaskName 'StatuslineReaper').LastTaskResult` → `0`.
+6. Tell the user: restart claude sessions (or `/hooks` once in each) to activate.
 
 ## Extending it
 
