@@ -14,10 +14,16 @@
 //!     renders: no renders, no strays, nothing to collect
 //!   * collection happens within a minute rather than up to five
 //!
-//! The sweep is rate-limited by the mtime of a stamp file, so the common render
-//! pays one `stat` (~10 us) and only one render a minute pays the ~1-3 ms
+//! The sweep is rate-limited by a stamp file, so the common render pays one
+//! small file read (~10 us) and only one render a minute pays the ~11 ms
 //! process-table walk.
+//!
+//! Only the sweep itself is Windows-specific — the abandoned-render bug is a
+//! Windows spawner behaviour, and collecting it needs the Win32 process APIs.
+//! The rate limit around it is portable and tested everywhere, and on other
+//! platforms the sweep compiles to nothing so the crate still builds.
 
+#[cfg(windows)]
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 
@@ -29,19 +35,27 @@ const NEVER_RAN_MS: u64 = 15_000;
 /// Ran, but outlived any plausible render - hung rather than suspended.
 const STALE_MS: u64 = 60_000;
 
+#[cfg(windows)]
 type Handle = isize;
+#[cfg(windows)]
 const INVALID_HANDLE_VALUE: Handle = -1;
+#[cfg(windows)]
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+#[cfg(windows)]
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+#[cfg(windows)]
 const PROCESS_TERMINATE: u32 = 0x0001;
+#[cfg(windows)]
 const MAX_PATH: usize = 260;
 
+#[cfg(windows)]
 #[repr(C)]
 struct FileTime {
     low: u32,
     high: u32,
 }
 
+#[cfg(windows)]
 impl FileTime {
     fn zero() -> Self {
         FileTime { low: 0, high: 0 }
@@ -51,6 +65,7 @@ impl FileTime {
     }
 }
 
+#[cfg(windows)]
 #[repr(C)]
 struct ProcessEntry32W {
     dw_size: u32,
@@ -65,6 +80,7 @@ struct ProcessEntry32W {
     sz_exe_file: [u16; MAX_PATH],
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
@@ -113,10 +129,23 @@ pub fn maybe_sweep(tasks_dir: &Path) {
     if std::fs::write(&stamp, now.to_string()).is_err() {
         return; // can't rate-limit, so don't sweep at all
     }
-    unsafe { sweep() }
+    sweep();
 }
 
-unsafe fn sweep() {
+/// On platforms without the Windows spawner bug there is nothing to collect,
+/// and no Win32 to collect it with, so this compiles away to nothing.
+#[cfg(not(windows))]
+fn sweep() {}
+
+#[cfg(windows)]
+fn sweep() {
+    // Safety: every call below is a Win32 query, or a terminate on a handle we
+    // opened ourselves; every raw buffer is sized by us and NUL-bounded.
+    unsafe { sweep_impl() }
+}
+
+#[cfg(windows)]
+unsafe fn sweep_impl() {
     let Ok(self_exe) = std::env::current_exe() else { return };
     let Some(self_name) = self_exe.file_name().map(|s| s.to_string_lossy().to_lowercase()) else {
         return;
@@ -145,6 +174,7 @@ unsafe fn sweep() {
 }
 
 /// Kill `pid` only if it is unambiguously an abandoned copy of *this* binary.
+#[cfg(windows)]
 unsafe fn consider(pid: u32, self_exe: &Path) {
     let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid);
     if h == 0 || h == INVALID_HANDLE_VALUE {
@@ -182,6 +212,7 @@ unsafe fn consider(pid: u32, self_exe: &Path) {
     CloseHandle(h);
 }
 
+#[cfg(windows)]
 fn wide_to_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     std::ffi::OsString::from_wide(&buf[..end])
@@ -193,6 +224,7 @@ fn wide_to_string(buf: &[u16]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn wide_conversion_stops_at_the_nul() {
         let mut buf = [0u16; 16];
@@ -202,6 +234,7 @@ mod tests {
         assert_eq!(wide_to_string(&buf), "statusline.exe");
     }
 
+    #[cfg(windows)]
     #[test]
     fn filetime_reassembles_both_halves() {
         let ft = FileTime { low: 0x8000_0000, high: 0x0000_0001 };

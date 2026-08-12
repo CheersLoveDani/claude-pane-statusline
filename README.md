@@ -123,6 +123,12 @@ about 18 are alive at any instant.)
   empty `[dependencies]` table on purpose, since every crate is build time and supply
   chain surface for a program that parses one small JSON object and prints one line.
 
+**Platform:** developed and measured on Windows 11, and everything above about Git Bash,
+conhosts and abandoned renders is Windows-specific. The crate itself compiles on other
+platforms — stray collection is `cfg`-gated to Windows, because that is where the spawner
+bug lives, and the rest is portable — but it is **untested** on macOS and Linux. The setup
+instructions assume Windows paths.
+
 ## Build
 
 ```sh
