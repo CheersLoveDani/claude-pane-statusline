@@ -69,7 +69,18 @@ try { fs.writeFileSync(pendingFile, ''); } catch (_) {}
 // cwd is tmpdir so the child session does not load this project's CLAUDE.md.
 // No `shell: true`: it bought nothing but an extra cmd.exe and its conhost on
 // every summarize, and libuv resolves `claude` -> claude.exe from PATH anyway.
-const r = spawnSync('claude', ['-p', '--model', 'haiku'], {
+//
+// `--mcp-config "" --strict-mcp-config` starts the child with no MCP servers.
+// A headless one-shot summarize needs no tools, but without this it boots the
+// full set from the user's config: measured 28.1 s of CPU and 158 processes per
+// prompt, against 8.8 s and 116 with them off. This is by far the most expensive
+// thing in the project - a render costs ~0.14 s - so it is worth the two flags.
+//
+// `--bare` would cut it to 1.3 s and 21 processes, but it forces auth to
+// ANTHROPIC_API_KEY only (no OAuth, no keychain) and so fails outright with
+// "Not logged in" on a subscription. Don't reach for it unless you have an API
+// key and are willing to pay for titles separately.
+const r = spawnSync('claude', ['-p', '--model', 'haiku', '--mcp-config', '', '--strict-mcp-config'], {
   input: instruction, encoding: 'utf8', timeout: 60000, cwd: os.tmpdir(),
   env: Object.assign({}, process.env, { RTS_TASK_SUMMARIZER: '1' }),
 });
